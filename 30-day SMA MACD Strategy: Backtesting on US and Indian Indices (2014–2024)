@@ -1,0 +1,212 @@
+# 30-day SMA MACD Strategy: Backtesting on US and Indian Indices (2014–2024)
+# Detailed execution and results can be found at: https://saudaminkhan.com/quant-trading-101
+## Step 1: Install Packages
+# Install the libraries
+install.packages("quantmod")
+install.packages("TTR")
+install.packages("PerformanceAnalytics")
+install.packages("ggplot2")
+install.packages("scales")
+install.packages("zoo")
+
+# Load the libraries
+library(quantmod)
+library(TTR)
+library(PerformanceAnalytics)
+library(ggplot2)
+library(scales)
+library(zoo)
+
+## Step 2: Download Data
+# Download data of US and Indian indexes from Yahoo Finance
+options(stringsAsFactors = FALSE)
+symbols <- c("^GSPC", "^DJI", "^IXIC", "^BSESN", "^NSEI")
+suppressWarnings(getSymbols(symbols, src = "yahoo", from = "2015-01-01", to = "2024-01-01"))
+
+## Step 2b: Prepare and Plot the Data
+# Take the data of index prices and merge the dataset
+df<-merge(GSPC$GSPC.Close, DJI$DJI.Close,IXIC$IXIC.Close,BSESN$BSESN.Close,NSEI$NSEI.Close)
+
+# Rename the columns
+names(df) <- c("^GSPC", "^DJI", "^IXIC", "^BSESN", "^NSEI")
+
+# View data
+head(df)
+# View last rows
+tail(df)
+# View data type and verify if is xts
+class(df)
+
+# Convert xts data to a data frame suitable for ggplot
+df_fortified <- fortify.zoo(df, melt = TRUE)  # fortify.zoo converts xts to data frame
+
+## Step 3: Visualise 
+# Plot the global indexes with refined axis labels and formatting
+g <- ggplot(aes(x = Index, y = Value, colour = Series), data = df_fortified) +
+  geom_line(size = 1) +
+  scale_y_continuous(labels = scales::comma, limits = c(0, 80000), breaks = seq(0, 80000, 10000)) +
+  scale_x_date(name = "Year", date_breaks = "2 years", date_labels = "%Y") +  # Adjust x-axis label and format
+  ggtitle("Global Indices") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for readability
+
+# Display the plot
+print(g)
+
+## Step 4a: Plotting Cumulative Returns
+# Calculate daily returns
+ret_df <- Return.calculate(df, method = "discrete")
+
+# Plot cumulative returns
+chart.CumReturns(ret_df, legend.loc = "topleft", main = "Cumulative Daily Returns for Global Index")
+
+## Step 4b: Calculating Cumulative Returns
+# Calculate average annualized return and convert to percentages
+annualized_returns <- Return.annualized(ret_df) * 100
+# Format the values to display as percentages with two decimal points
+annualized_returns <- round(annualized_returns, 2)
+# View the formatted values
+print(annualized_returns)
+
+## Step 5: Strategy Development
+MACD_strategy <- function(dt, n = 30) {
+  # Rename column for clarity
+  names(dt) <- "close"
+  
+  # Fill missing values to ensure smooth moving average calculation
+  dat <- na.locf(dt)
+  
+  # Calculate the 30-day moving average
+  dat$ma <- SMA(dat$close, n)
+  
+  # Identify buy/sell signals based on moving average crossover
+  sig_buy <- which(dat$ma - dat$close > 0)    # Buy signal when MA > Close
+  sig_sell <- which(dat$ma - dat$close < 0)   # Sell signal when MA < Close
+  
+  # Filter out consecutive signals to prevent over-trading
+  sig_buy <- sig_buy[which(diff(sig_buy) > 1)]
+  sig_sell <- sig_sell[which(diff(sig_sell) > 1)]
+  
+  # Ensure a logical sequence: first signal is a buy, last is a sell
+  if (length(sig_sell) > 0 && first(sig_sell) < first(sig_buy)) sig_sell <- sig_sell[-1]
+  if (length(sig_buy) > 0 && last(sig_sell) < last(sig_buy)) sig_buy <- sig_buy[-length(sig_buy)]
+  
+  # Create trading intervals based on buy/sell pairs
+  trade_data <- do.call(rbind, lapply(1:length(sig_buy), function(i) {
+    dt[sig_buy[i]:sig_sell[i], ]
+  }))
+  
+  # Calculate returns for each trade
+  ret_trade <- Return.calculate(trade_data, method = "discrete")
+  
+  # Return calculated returns for the strategy
+  return(ret_trade)
+}
+
+## Step 6: Strategy Application
+# Apply the MACD strategy to each index and store the results
+macd_ret <- lapply(df, function(col) MACD_strategy(col, 30))
+
+# Combine returns into a single xts object to ensure alignment
+aligned_macd_ret <- do.call(merge, lapply(macd_ret, na.locf))
+
+# Calculate annualized returns for each index strategy, converted to percentages
+annualized_macd_ret <- sapply(aligned_macd_ret, Return.annualized) * 100
+
+# Display the annualized returns, rounded to two decimal points
+print(round(annualized_macd_ret, 2))
+
+## Step 7: Statistical Significance of Strategy Returns
+# Testing Mean Returns Against Zero
+
+# For each index, perform a t-test on the strategy returns
+for (i in names(aligned_macd_ret)) {
+  ret <- na.omit(aligned_macd_ret[, i])
+  t_result <- t.test(ret)
+  cat("\nT-test for", i, "\n")
+  print(t_result)
+}
+
+# Step 8: Robustness Checks
+# 8a. Varying Moving Average Periods
+# Test the sensitivity of your results to different moving average lengths.
+ma_periods <- c(15, 30, 60, 90)
+results <- list()
+for (n in ma_periods) {
+  macd_ret <- lapply(df, function(col) MACD_strategy(col, n))
+  aligned_macd_ret <- do.call(merge, lapply(macd_ret, na.locf))
+  annualized_macd_ret <- sapply(aligned_macd_ret, Return.annualized) * 100
+  results[[as.character(n)]] <- round(annualized_macd_ret, 2)
+}
+# Display results for different MA periods
+print(results)
+
+# 8b. Sub-Sample Analysis
+# Check if the strategy performs consistently over different time periods.
+# Define the sub-periods
+sub_periods <- list(
+  "2015-2017" = "2015-01-01/2017-12-31",
+  "2018-2020" = "2018-01-01/2020-12-31",
+  "2021-2023" = "2021-01-01/2023-12-31"
+)
+# Loop over each sub-period and calculate both strategy and index annualized returns
+for (period_name in names(sub_periods)) {
+  # Extract data for the specific sub-period
+  period <- sub_periods[[period_name]]
+  df_period <- df[period]
+  
+  # Calculate daily returns for the indices in the sub-period
+  ret_df_period <- Return.calculate(df_period, method = "discrete")
+  
+  # Calculate annualized returns for each index and format them
+  annualized_ret <- round(Return.annualized(ret_df_period) * 100, 2)
+  
+  # Calculate strategy returns for each index in the sub-period using MACD strategy
+  macd_ret_period <- lapply(df_period, function(col) MACD_strategy(col, 30))
+  aligned_macd_ret_period <- do.call(merge, lapply(macd_ret_period, na.locf))
+  
+  # Calculate annualized returns for the strategy and format them
+  annualized_macd_ret <- round(sapply(aligned_macd_ret_period, Return.annualized) * 100, 2)
+  
+  # Print results for both the index and strategy annualized returns
+  cat("\nAnnualized Returns for", period_name, "\n")
+  cat("Index Returns:\n")
+  print(annualized_ret)
+  
+  cat("Strategy (MACD) Returns:\n")
+  print(annualized_macd_ret)
+}
+
+## Step 9: Bootstrapping
+# Use bootstrapping to assess the significance of your strategy's performance without relying on normality assumptions.
+install.packages("boot")
+library(boot)
+# Define bootstrapping function
+boot_fn <- function(data, indices) {
+  sample_returns <- data[indices]
+  mean(sample_returns)
+}
+# Apply bootstrapping to each index
+for (i in names(aligned_macd_ret)) {
+  strategy_ret <- na.omit(aligned_macd_ret[, i])
+  boot_results <- boot(as.numeric(strategy_ret), boot_fn, R = 1000)
+  cat("\nBootstrapping Results for", i, "\n")
+  print(boot.ci(boot_results, type = "perc"))
+}
+
+## Step 10: Risk Assessment
+# Define the risk-free rate and the Minimum Acceptable Return (MAR) for Sortino
+risk_free_rate <- 0.03 / 252  # Daily risk-free rate (3% annualized, divided by 252 trading days)
+MAR <- risk_free_rate          # Set Minimum Acceptable Return to the daily risk-free rate
+
+# Calculate Sharpe Ratio for strategy returns with 3% annualized risk-free rate and annualize with 252 days
+strategy_sharpe <- SharpeRatio.annualized(aligned_macd_ret, Rf = risk_free_rate, scale = 252)
+print("Annualized Sharpe Ratio (3% risk-free rate):")
+print(strategy_sharpe)
+
+# Calculate Sortino Ratio for strategy returns with MAR set to 3% risk-free rate
+strategy_sortino <- SortinoRatio(aligned_macd_ret, MAR = MAR)
+print("Sortino Ratio (MAR set to 3% risk-free rate):")
+print(strategy_sortino)
+
+
